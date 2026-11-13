@@ -93,6 +93,14 @@ button:disabled{opacity:.35;cursor:default}
 /* Keys */
 .card-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px}
 .keys-hint{color:var(--muted);font-size:12.5px;margin:10px 2px 0}
+.metro{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px auto 0;max-width:440px;padding:10px 12px 10px 16px;border-radius:20px;background:var(--tile)}
+.metro .beat{width:8px;height:8px;border-radius:50%;background:var(--faint);transition:transform .08s,background .08s;flex:none}
+.metro .beat.pulse{background:var(--accent);transform:scale(1.5)}
+.metro .beat.pulse.acc{transform:scale(2)}
+.metro-tempo{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;letter-spacing:.12em;color:var(--muted)}
+.metro-tempo output{font-size:20px;font-weight:300;letter-spacing:0;color:var(--ink);min-width:34px;text-align:center;font-variant-numeric:tabular-nums}
+.mini{width:32px;height:32px;border-radius:50%;background:var(--card);display:grid;place-items:center;color:var(--ink-2);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.mini svg{width:16px;height:16px;stroke-width:1.6}
 .switch{display:inline-flex;align-items:center;gap:10px;font-size:14px;font-weight:550;color:var(--ink-2)}
 .switch .track{position:relative;width:51px;height:31px;border-radius:999px;background:var(--track);transition:background .2s;flex:none}
 .switch .track::after{content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 3px 8px rgba(0,0,0,.15),0 1px 1px rgba(0,0,0,.08);transition:transform .2s}
@@ -208,6 +216,14 @@ button:disabled{opacity:.35;cursor:default}
     <p class="sub" id="recSub">Tap the dial. Up to 12 seconds, one note at a time.</p>
     <div class="live" aria-hidden="true"><canvas id="wave" width="640" height="88"></canvas><span class="bubble" id="bubble">–</span></div>
     <p class="msg" id="msg" role="status"></p>
+    <div class="metro">
+      <button class="switch" id="metroBtn" role="switch" aria-checked="false" title="Counts you in, then clicks to keep you in time"><span class="beat" id="metroDot" aria-hidden="true"></span><span>Metronome</span><span class="track"></span></button>
+      <div class="metro-tempo">
+        <button class="mini" id="mSlower" aria-label="Slower"><svg viewBox="0 0 24 24" class="ic"><path d="M5 12h14"/></svg></button>
+        <output id="metroBpm">90</output><span>BPM</span>
+        <button class="mini" id="mFaster" aria-label="Faster"><svg viewBox="0 0 24 24" class="ic"><path d="M5 12h14M12 5v14"/></svg></button>
+      </div>
+    </div>
     <div class="actions">
       <button class="pill-btn" id="sampleBtn"><svg viewBox="0 0 24 24" class="ic"><path d="M12 3.5l2.4 5.2 5.6.6-4.2 3.8 1.2 5.6L12 15.9l-5 2.8 1.2-5.6L4 9.3l5.6-.6z"/></svg>Sample tune</button>
       <button class="pill-btn" id="clearBtn"><svg viewBox="0 0 24 24" class="ic"><path d="M4.5 7h15M10 11v6M14 11v6M6.5 7l1 13h9l1-13M9.5 7V4h5v3"/></svg>Clear</button>
@@ -403,12 +419,16 @@ function estimateTempo(notes){
   return Math.round(best);
 }
 
-// Seconds → beats from the first note. Capped at 8 bars.
-function toBeats(notes,bpm,maxBeats=32){
+// Seconds → beats. Without a metronome, beat 0 is the first note. With one, `origin` is its
+// downbeat (in the notes' clock), so a tune that starts on beat 2 stays there; whole empty bars
+// before the tune are skipped, and a note a touch early counts as on the beat. Capped at 8 bars.
+function toBeats(notes,bpm,maxBeats=32,origin){
   if(!notes.length) return [];
-  const spb=60/bpm, t0=notes[0].start;
-  return notes.map(n=>({midi:n.midi,beat:(n.start-t0)/spb,beats:n.dur/spb}))
-    .filter(n=>n.beat<maxBeats)
+  const spb=60/bpm;
+  let t0=notes[0].start;
+  if(origin!=null){ const bar=4*spb; t0=origin+Math.floor((notes[0].start-origin+0.25*spb)/bar)*bar; }
+  return notes.map(n=>{ const b=(n.start-t0)/spb, len=n.dur/spb; return b<0? {midi:n.midi,beat:0,beats:len+b} : {midi:n.midi,beat:b,beats:len}; })
+    .filter(n=>n.beats>0 && n.beat<maxBeats)
     .map(n=>({midi:n.midi,beat:n.beat,beats:Math.min(n.beats,maxBeats-n.beat)}));
 }
 function barsFromBeats(mel){
@@ -541,7 +561,7 @@ const state={source:{kind:'sample',mel:sampleMel},bpm:90,style:'simple',loop:tru
 
 function sketch(){
   const src=state.source;
-  const raw=src.kind==='time'? toBeats(src.notes,src.bpm||state.bpm) : src.mel;
+  const raw=src.kind==='time'? toBeats(src.notes,src.bpm||state.bpm,32,src.origin) : src.mel;
   const mel=raw.map(n=>({midi:n.midi+state.transpose,beat:n.beat,beats:n.beats}));
   const key=detectKey(mel.map(n=>({midi:n.midi,dur:n.beats})));
   const from=state.transpose? detectKey(raw.map(n=>({midi:n.midi,dur:n.beats}))) : key;
@@ -669,6 +689,7 @@ function play(){
   player.bus=ctx.createGain(); player.bus.connect(master);
   player.spb=60/state.bpm; player.total=state.r.bars.length*4; player.playing=true;
   player.start=ctx.currentTime+.08; schedulePass(player.start);
+  if(metro.on) metroAlign(player.start);
   setPlayIcon(true); tick();
 }
 function stop(silent){
@@ -724,20 +745,27 @@ async function startMic(){
   }
   mic.src=ctx.createMediaStreamSource(mic.stream); mic.an=ctx.createAnalyser(); mic.an.fftSize=2048; mic.src.connect(mic.an);
   const buf=new Float32Array(2048), half=new Float32Array(1024);
-  mic.frames=[]; mic.t0=ctx.currentTime; mic.on=true; mic.busy=false;
+  mic.frames=[]; mic.on=true; mic.busy=false; mic.metro=metro.on;
+  if(metro.on){ const at=ctx.currentTime+.1; metroStart(at); mic.t0=at+4*60/state.bpm; } else mic.t0=ctx.currentTime;
   setRecUI(true);
   let last=null; const levels=[];
   mic.timer=setInterval(()=>{
     mic.an.getFloatTimeDomainData(buf);
     let rms=0;
     for(let i=0;i<1024;i++){ half[i]=(buf[2*i]+buf[2*i+1])/2; rms+=half[i]*half[i]; }
-    const f=detectPitch(half,ctx.sampleRate/2), m=f?freqToMidi(f):null, t=ctx.currentTime-mic.t0;
+    const t=ctx.currentTime-mic.t0-1024/ctx.sampleRate; // the detector hears ~half a window late
+    if(t<-0.15){ // counting in
+      $('#recPillText').textContent='Get ready'; $('#recTitle').textContent=String(Math.min(4,Math.ceil(-t/(60/state.bpm))));
+      return;
+    }
+    $('#recPillText').textContent='Listening';
+    const f=detectPitch(half,ctx.sampleRate/2), m=f?freqToMidi(f):null;
     mic.frames.push({t,midi:m});
     const r=m==null?null:Math.round(m);
     if(r!==last){ last=r; if(r!=null) $('#bubble').textContent=midiName(r); }
     levels.push(Math.min(1,Math.sqrt(rms/1024)*6)); if(levels.length>40) levels.shift();
     drawWave(levels);
-    $('#recTitle').textContent='0:'+String(Math.floor(t)).padStart(2,'0');
+    $('#recTitle').textContent='0:'+String(Math.max(0,Math.floor(t))).padStart(2,'0');
     setTicks(t/REC_MAX);
     if(t>=REC_MAX) stopMic();
   },30);
@@ -750,8 +778,9 @@ function stopMic(){
   setRecUI(false);
   const notes=framesToNotes(mic.frames);
   if(notes.length<2){ say("I couldn't hear a clear tune. Try humming a little louder, closer to the mic, one note at a time."); return; }
-  const bpm=estimateTempo(notes); showTempo(bpm);
-  state.source={kind:'time',from:'voice',notes,bpm}; state.overrides=[]; state.transpose=0; sketch();
+  let bpm, origin;
+  if(mic.metro){ bpm=state.bpm; origin=0; } else { bpm=estimateTempo(notes); showTempo(bpm); }
+  state.source={kind:'time',from:'voice',notes,bpm,origin}; state.overrides=[]; state.transpose=0; sketch();
   announce('Done. In '+state.r.key.name+'.');
   $('#result').scrollIntoView({behavior:'smooth',block:'start'});
 }
@@ -825,12 +854,16 @@ function noteOn(m){
   audio(); if(mic.on) return;
   damp(m); ringing.set(m,INST.ep(master,ctx.currentTime,m,4,.16));
   const k=keyEl(m); if(k) k.classList.add('down');
-  if(state.source.kind!=='time'||state.source.from!=='keys'){
-    stop(); take.notes=[]; take.shift=0; state.source={kind:'time',from:'keys',notes:take.notes}; state.overrides=[]; state.transpose=0;
+  if(state.source.kind!=='time'||state.source.from!=='keys'||(!take.notes.length&&!take.down.size)){
+    stop(); take.notes=[]; take.shift=0; state.overrides=[]; state.transpose=0;
+    take.origin=metro.on? lastDownbeat(ctx.currentTime+0.25*60/state.bpm) : undefined;
+    state.source={kind:'time',from:'keys',notes:take.notes,origin:take.origin,bpm:take.origin!=null?state.bpm:undefined};
   }
-  let now=performance.now()/1000-take.shift;
+  let now=ctx.currentTime-take.shift;
   const spb=60/state.bpm, last=take.notes[take.notes.length-1];
-  if(last){ const gap=now-(last.start+last.dur); if(gap>4*spb){ take.shift+=gap-spb; now-=gap-spb; } }
+  if(last){ const gap=now-(last.start+last.dur); if(gap>4*spb){
+    const cut=take.origin!=null? Math.floor((gap-spb)/(4*spb))*4*spb : gap-spb; // keep the bar grid with a metronome
+    take.shift+=cut; now-=cut; } }
   if(take.notes.length && now-take.notes[0].start>=32*spb){ say("That's 8 bars, the most I keep. Tap Clear to start again."); return; }
   take.down.set(m,now);
   clearTimeout(take.timer);
@@ -840,13 +873,48 @@ function noteOff(m){
   held.delete(m); if(!state.sustain) damp(m);
   if(!take.down.has(m)) return;
   const start=take.down.get(m); take.down.delete(m);
-  const end=performance.now()/1000-take.shift;
+  const end=ctx.currentTime-take.shift;
   take.notes.push({midi:m,start,dur:Math.max(.12,end-start)});
   take.notes.sort((a,b)=>a.start-b.start);
-  clearTimeout(take.timer); take.timer=setTimeout(()=>{ if(take.down.size) return; state.source.bpm=estimateTempo(take.notes); showTempo(state.source.bpm); sketch(); },350);
+  clearTimeout(take.timer); take.timer=setTimeout(()=>{ if(take.down.size) return; if(state.source.origin==null){ state.source.bpm=estimateTempo(take.notes); showTempo(state.source.bpm); } sketch(); },350);
 }
 document.addEventListener('keydown',e=>{ if(e.repeat||e.metaKey||e.ctrlKey||e.altKey||/INPUT|TEXTAREA/.test(e.target.tagName)) return; const m=COMPUTER_KEYS[e.key.toLowerCase()]; if(m!=null){ e.preventDefault(); noteOn(m); } });
 document.addEventListener('keyup',e=>{ const m=COMPUTER_KEYS[e.key.toLowerCase()]; if(m!=null) noteOff(m); });
+
+/* ---------- Metronome ---------- */
+const metro={on:false,next:0,beat:0,timer:0,downbeats:[],noise:null};
+function click(t,accent){
+  if(!metro.noise){ const len=Math.ceil(ctx.sampleRate*.03); metro.noise=ctx.createBuffer(1,len,ctx.sampleRate); const d=metro.noise.getChannelData(0); for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,4); }
+  const src=ctx.createBufferSource(); src.buffer=metro.noise;
+  const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=accent?3400:2300; bp.Q.value=2.5;
+  const g=ctx.createGain(); g.gain.value=accent?1:.55;
+  src.connect(bp); bp.connect(g); g.connect(master); src.start(t);
+  setTimeout(()=>{ const d=$('#metroDot'); d.classList.add('pulse'); d.classList.toggle('acc',accent); setTimeout(()=>d.classList.remove('pulse','acc'),110); },Math.max(0,(t-ctx.currentTime)*1000));
+}
+function metroTick(){
+  const ahead=ctx.currentTime+.12;
+  while(metro.next<ahead){
+    const acc=metro.beat%4===0;
+    if(acc){ metro.downbeats.push(metro.next); if(metro.downbeats.length>64) metro.downbeats.shift(); }
+    click(metro.next,acc); metro.next+=60/state.bpm; metro.beat++;
+  }
+}
+function metroStart(at){ audio(); metro.next=at!=null? at : ctx.currentTime+.06; metro.beat=0; metro.downbeats=[]; clearInterval(metro.timer); metro.timer=setInterval(metroTick,25); metroTick(); }
+function metroStop(){ clearInterval(metro.timer); metro.timer=0; }
+function metroAlign(start){ // line the clicks up with playback that started at `start`
+  const spb=60/state.bpm, k=Math.max(0,Math.ceil((ctx.currentTime+.02-start)/spb));
+  metro.next=start+k*spb; metro.beat=k; metro.downbeats=[];
+  if(!metro.timer){ clearInterval(metro.timer); metro.timer=setInterval(metroTick,25); }
+  metroTick();
+}
+function lastDownbeat(t){ let d; metro.downbeats.forEach(x=>{ if(x<=t) d=x; }); return d; }
+function setMetro(on){
+  metro.on=on; $('#metroBtn').setAttribute('aria-checked',on);
+  if(!on){ metroStop(); return; }
+  audio(); if(player.playing) metroAlign(player.start); else metroStart();
+}
+$('#metroBtn').addEventListener('click',()=>{ if(!mic.on) setMetro(!metro.on); });
+document.addEventListener('visibilitychange',()=>{ if(!metro.on) return; if(document.hidden) metroStop(); else metroStart(); });
 
 /* ---------- Chord on the keys ---------- */
 let keysShown='', keysPeek=0;
@@ -900,14 +968,14 @@ $('#melBtn').addEventListener('click',e=>{ state.melody=!state.melody; e.current
 // The tempo is playback speed. A recording keeps its own beat (source.bpm) for the bar lines,
 // so changing speed never moves the chords against the tune.
 function showTempo(v){
-  state.bpm=v; $('#tempoOut').textContent=v;
-  $('#slower').disabled=v<=60; $('#faster').disabled=v>=140;
+  state.bpm=v; $('#tempoOut').textContent=v; $('#metroBpm').textContent=v;
+  $('#slower').disabled=$('#mSlower').disabled=v<=60; $('#faster').disabled=$('#mFaster').disabled=v>=140;
 }
 function setTempo(v){
   v=Math.max(60,Math.min(140,v)); if(v===state.bpm) return;
   showTempo(v);
 }
-[['#slower',-2],['#faster',2]].forEach(([id,d])=>{
+[['#slower',-2],['#faster',2],['#mSlower',-2],['#mFaster',2]].forEach(([id,d])=>{
   const b=$(id); let hold=0, rep=0, held=false;
   const end=()=>{ clearTimeout(hold); clearInterval(rep); if(held) restartIfPlaying(); };
   b.addEventListener('pointerdown',()=>{ held=false; hold=setTimeout(()=>{ held=true; rep=setInterval(()=>setTempo(state.bpm+d),80); },420); });

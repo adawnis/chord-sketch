@@ -11,6 +11,8 @@ Chord Sketch is a small web tool for the moment a melody shows up and there's no
 - plays it all back, with loop and tempo
 - lights up each chord's notes on the keyboard as it plays
 - moves the whole song up or down a key, to suit the singer
+- counts you in with a metronome and keeps you in time
+- has a sustain switch that works like a piano pedal
 
 Tap any chord to try another one. Three colour themes: Warm, Cool and Night.
 
