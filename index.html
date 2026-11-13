@@ -92,7 +92,12 @@ button:disabled{opacity:.35;cursor:default}
 
 /* Keys */
 .card-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px}
-.keys-hint{color:var(--muted);font-size:12.5px}
+.keys-hint{color:var(--muted);font-size:12.5px;margin:10px 2px 0}
+.switch{display:inline-flex;align-items:center;gap:10px;font-size:14px;font-weight:550;color:var(--ink-2)}
+.switch .track{position:relative;width:51px;height:31px;border-radius:999px;background:var(--track);transition:background .2s;flex:none}
+.switch .track::after{content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 3px 8px rgba(0,0,0,.15),0 1px 1px rgba(0,0,0,.08);transition:transform .2s}
+.switch[aria-checked="true"] .track{background:var(--accent)}
+.switch[aria-checked="true"] .track::after{transform:translateX(20px)}
 .keys-scroll{overflow-x:auto;overscroll-behavior-x:contain;padding:10px 8px 12px;border-radius:22px;background:var(--tile);box-shadow:inset 0 2px 6px rgba(0,0,0,.06);scrollbar-width:none}
 .keys-scroll::-webkit-scrollbar{display:none}
 .keys{position:relative;display:flex;height:148px;min-width:600px;user-select:none;-webkit-user-select:none;touch-action:none}
@@ -210,9 +215,10 @@ button:disabled{opacity:.35;cursor:default}
   </section>
 
   <section class="card" aria-labelledby="keys-h">
-    <div class="card-head"><p class="label" id="keys-h">Or tap it in</p><span class="keys-hint">In rhythm<span class="pc-only"> · or A to K on your keyboard</span></span></div>
+    <div class="card-head"><p class="label" id="keys-h">Or tap it in</p><button class="switch" id="susBtn" role="switch" aria-checked="true" title="Like a piano's sustain pedal: notes ring on after you let go"><span>Sustain</span><span class="track"></span></button></div>
     <div class="keys-scroll" id="keysScroll"><div class="keys" id="keys" aria-label="Piano keys"></div></div>
     <p class="keys-now" id="keysNow"></p>
+    <p class="keys-hint">Tap in rhythm<span class="pc-only">, or use A to K on your keyboard</span>. Sustain works like a piano pedal, for the keys and the playback.</p>
   </section>
 
   <section class="card" aria-labelledby="res-h" id="result">
@@ -327,6 +333,26 @@ function framesToNotes(frames){
     if(last && last.midi===s.midi && s.start-(last.start+last.dur)<0.15) last.dur=s.end-last.start;
     else out.push({midi:s.midi,start:s.start,dur:s.end-s.start});
   });
+  // Split-second strays: a jump far from both neighbours (the detector catching an overtone,
+  // or a squeak) or a lone blip (a breath, a tap on the phone). Slips inside a note are folded
+  // back into it; anything else is dropped. Real notes held for a moment are left alone.
+  for(let pass=0;pass<3;pass++){
+    for(let i=0;i<out.length;i++){
+      const n=out[i]; if(n.dur>=0.2) continue;
+      const p=out[i-1], x=out[i+1];
+      const gp=p? n.start-(p.start+p.dur) : Infinity, gx=x? x.start-(n.start+n.dur) : Infinity;
+      const leap=(!p||Math.abs(n.midi-p.midi)>=7)&&(!x||Math.abs(n.midi-x.midi)>=7);
+      const alone=gp>=0.15&&gx>=0.15;
+      if(!leap&&!alone) continue;
+      if(leap&&p&&gp<0.05) p.dur=n.start+n.dur-p.start;
+      else if(leap&&x&&gx<0.05){ x.dur+=x.start-n.start; x.start=n.start; }
+      out.splice(i,1); i--;
+    }
+    for(let i=1;i<out.length;i++){
+      const a=out[i-1], b=out[i];
+      if(a.midi===b.midi && b.start-(a.start+a.dur)<0.15){ a.dur=b.start+b.dur-a.start; out.splice(i,1); i--; }
+    }
+  }
   return out;
 }
 
@@ -511,7 +537,7 @@ const SAMPLE=[ // An original 8-bar tune in G: [midi, beats]
 ];
 const sampleMel=(()=>{ let b=0; return SAMPLE.map(([midi,beats])=>{ const n={midi,beat:b,beats:beats*0.95}; b+=beats; return n; }); })();
 
-const state={source:{kind:'sample',mel:sampleMel},bpm:90,style:'simple',loop:true,melody:true,overrides:[],transpose:0,r:null};
+const state={source:{kind:'sample',mel:sampleMel},bpm:90,style:'simple',loop:true,melody:true,sustain:true,overrides:[],transpose:0,r:null};
 
 function sketch(){
   const src=state.source;
@@ -583,15 +609,18 @@ function env(t,peak,att,sustain,dur,rel){
 }
 function osc(type,f,t,end,dest,detune=0){ const o=ctx.createOscillator(); o.type=type; o.frequency.value=f; o.detune.value=detune; o.connect(dest); o.start(t); o.stop(end); return o; }
 const INST={
-  ep(dest,t,m,dur,v=.14){ // soft electric piano
-    const f=midiToFreq(m), g=env(t,v,.006,.35,dur,.18); g.connect(dest);
-    osc('sine',f,t,t+dur+1,g); const h=ctx.createGain(); h.gain.value=.18; h.connect(g); osc('sine',f*2,t,t+dur+1,h);
+  ep(dest,t,m,dur,v=.14){ // soft electric piano; rings on with the sustain pedal down
+    const rel=state.sustain? .7 : .07, end=t+dur+rel*5+.05;
+    const f=midiToFreq(m), g=env(t,v,.006,.35,dur,rel); g.connect(dest);
+    osc('sine',f,t,end,g); const h=ctx.createGain(); h.gain.value=.18; h.connect(g); osc('sine',f*2,t,end,h);
     const bell=ctx.createGain(); bell.gain.setValueAtTime(v*.5,t); bell.gain.exponentialRampToValueAtTime(.0001,t+.25); bell.connect(dest); osc('sine',f*7,t,t+.3,bell);
+    return g;
   },
   pad(dest,t,m,dur,v=.05){ // warm organ-ish pad for gospel
     const f=midiToFreq(m), lp=ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=1500; lp.connect(dest);
-    const g=env(t,v,.12,.85,dur,.3); g.connect(lp);
-    osc('sawtooth',f,t,t+dur+1.4,g,-6); osc('sawtooth',f,t,t+dur+1.4,g,6);
+    const rel=state.sustain? .9 : .12, end=t+dur+rel*5+.05;
+    const g=env(t,v,.12,.85,dur,rel); g.connect(lp);
+    osc('sawtooth',f,t,end,g,-6); osc('sawtooth',f,t,end,g,6);
   },
   bass(dest,t,m,dur,v=.32){
     const f=midiToFreq(m), lp=ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=650; lp.connect(dest);
@@ -779,11 +808,22 @@ function buildKeys(){
   const up=e=>{ if(!active.has(e.pointerId)) return; noteOff(active.get(e.pointerId)); active.delete(e.pointerId); };
   ['pointerup','pointercancel','pointerleave'].forEach(t=>el.addEventListener(t,up));
 }
+const ringing=new Map(), held=new Set();
+function damp(m){
+  const g=ringing.get(m); if(!g) return; ringing.delete(m);
+  const now=ctx.currentTime; g.gain.cancelScheduledValues(now); g.gain.setValueAtTime(g.gain.value,now); g.gain.setTargetAtTime(0,now,.05);
+}
+function setSustain(on){
+  state.sustain=on; $('#susBtn').setAttribute('aria-checked',on);
+  if(!on) [...ringing.keys()].forEach(m=>{ if(!held.has(m)) damp(m); }); // lifting the pedal
+  restartIfPlaying();
+}
 function keyEl(m){ return document.querySelector(`#keys [data-m="${m}"]`); }
 function noteOn(m){
   if(take.down.has(m)) return;
+  held.add(m);
   audio(); if(mic.on) return;
-  INST.ep(master,ctx.currentTime,m,1.4,.16);
+  damp(m); ringing.set(m,INST.ep(master,ctx.currentTime,m,4,.16));
   const k=keyEl(m); if(k) k.classList.add('down');
   if(state.source.kind!=='time'||state.source.from!=='keys'){
     stop(); take.notes=[]; take.shift=0; state.source={kind:'time',from:'keys',notes:take.notes}; state.overrides=[]; state.transpose=0;
@@ -797,6 +837,7 @@ function noteOn(m){
 }
 function noteOff(m){
   const k=keyEl(m); if(k) k.classList.remove('down');
+  held.delete(m); if(!state.sustain) damp(m);
   if(!take.down.has(m)) return;
   const start=take.down.get(m); take.down.delete(m);
   const end=performance.now()/1000-take.shift;
@@ -852,6 +893,7 @@ $('#bars').addEventListener('click',e=>{
   const nb=document.querySelector(`button.ch[data-bar="${i}"]`); if(nb){ nb.focus(); announce('Bar '+(i+1)+': '+nb.querySelector('b').textContent); }
   if(!player.playing){ audio(); const s=state.r.segs.find(s=>s.bar===i&&!s.passing); const t=ctx.currentTime+.02; s.tones.forEach(m=>INST.ep(master,t,m,1.2,.1)); INST.bass(master,t,s.bass,1.2); showKeys(s,null,true); clearTimeout(keysPeek); keysPeek=setTimeout(()=>{ if(!player.playing) showKeys(null); },1800); }
 });
+$('#susBtn').addEventListener('click',()=>setSustain(!state.sustain));
 $('#playBtn').addEventListener('click',()=>player.playing?stop():play());
 $('#loopBtn').addEventListener('click',e=>{ state.loop=!state.loop; e.currentTarget.setAttribute('aria-pressed',state.loop); });
 $('#melBtn').addEventListener('click',e=>{ state.melody=!state.melody; e.currentTarget.setAttribute('aria-pressed',state.melody); restartIfPlaying(); });
