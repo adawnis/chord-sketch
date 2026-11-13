@@ -313,6 +313,14 @@ function framesToNotes(frames){
     cur= m==null? null : {midi:m,start:t};
   }
   if(cur){ cur.end=frames[frames.length-1].t+step; segs.push(cur); }
+  // A short blip right next to a nearby note is a voice sliding in or out of it: fold it into that note.
+  segs.forEach((s,i)=>{
+    if(s.end-s.start>=0.16) return;
+    const nx=segs[i+1], pv=segs[i-1], long=x=>x&&!x.gone&&x.end-x.start>=0.16;
+    if(long(nx) && nx.start-s.end<0.05 && Math.abs(nx.midi-s.midi)<=2){ nx.start=s.start; s.gone=true; }
+    else if(long(pv) && s.start-pv.end<0.05 && Math.abs(pv.midi-s.midi)<=2){ pv.end=s.end; s.gone=true; }
+  });
+  for(let i=segs.length-1;i>=0;i--) if(segs[i].gone) segs.splice(i,1);
   const out=[];
   segs.filter(s=>s.end-s.start>=0.12).forEach(s=>{
     const last=out[out.length-1];
@@ -351,6 +359,22 @@ function detectKey(notes){
     }
   }
   return {tonic:best.tonic,mode:best.mode,name:keyName(best.tonic,best.mode)};
+}
+
+// Find the tempo the tune was sung or played at: the beat (60–140 BPM) whose eighth-note grid
+// best fits where notes start and how long they last, with a gentle pull towards ~95 BPM.
+function estimateTempo(notes){
+  if(notes.length<3) return 90;
+  const t0=notes[0].start;
+  let best=90,bs=-Infinity;
+  for(let bpm=60;bpm<=140;bpm+=0.5){
+    const half=30/bpm; let err=0,W=0;
+    const add=(x,w)=>{ const d=x-Math.round(x); err+=w*d*d; W+=w; };
+    notes.forEach(n=>{ const w=Math.min(1.5,n.dur); add((n.start-t0)/half,w); add((n.dur+0.06)/half,w*0.5); });
+    const s=-err/W-0.04*Math.log2(bpm/95)**2;
+    if(s>bs){ bs=s; best=bpm; }
+  }
+  return Math.round(best);
 }
 
 // Seconds → beats from the first note. Capped at 8 bars.
@@ -491,7 +515,7 @@ const state={source:{kind:'sample',mel:sampleMel},bpm:90,style:'simple',loop:tru
 
 function sketch(){
   const src=state.source;
-  const raw=src.kind==='time'? toBeats(src.notes,state.bpm) : src.mel;
+  const raw=src.kind==='time'? toBeats(src.notes,src.bpm||state.bpm) : src.mel;
   const mel=raw.map(n=>({midi:n.midi+state.transpose,beat:n.beat,beats:n.beats}));
   const key=detectKey(mel.map(n=>({midi:n.midi,dur:n.beats})));
   const from=state.transpose? detectKey(raw.map(n=>({midi:n.midi,dur:n.beats}))) : key;
@@ -697,7 +721,8 @@ function stopMic(){
   setRecUI(false);
   const notes=framesToNotes(mic.frames);
   if(notes.length<2){ say("I couldn't hear a clear tune. Try humming a little louder, closer to the mic, one note at a time."); return; }
-  state.source={kind:'time',from:'voice',notes}; state.overrides=[]; state.transpose=0; sketch();
+  const bpm=estimateTempo(notes); showTempo(bpm);
+  state.source={kind:'time',from:'voice',notes,bpm}; state.overrides=[]; state.transpose=0; sketch();
   announce('Done. In '+state.r.key.name+'.');
   $('#result').scrollIntoView({behavior:'smooth',block:'start'});
 }
@@ -777,7 +802,7 @@ function noteOff(m){
   const end=performance.now()/1000-take.shift;
   take.notes.push({midi:m,start,dur:Math.max(.12,end-start)});
   take.notes.sort((a,b)=>a.start-b.start);
-  clearTimeout(take.timer); take.timer=setTimeout(()=>{ if(!take.down.size) sketch(); },350);
+  clearTimeout(take.timer); take.timer=setTimeout(()=>{ if(take.down.size) return; state.source.bpm=estimateTempo(take.notes); showTempo(state.source.bpm); sketch(); },350);
 }
 document.addEventListener('keydown',e=>{ if(e.repeat||e.metaKey||e.ctrlKey||e.altKey||/INPUT|TEXTAREA/.test(e.target.tagName)) return; const m=COMPUTER_KEYS[e.key.toLowerCase()]; if(m!=null){ e.preventDefault(); noteOn(m); } });
 document.addEventListener('keyup',e=>{ const m=COMPUTER_KEYS[e.key.toLowerCase()]; if(m!=null) noteOff(m); });
@@ -812,7 +837,7 @@ $('#keyDown').addEventListener('click',()=>setTranspose(state.transpose-1));
 $('#moved').addEventListener('click',e=>{ if(e.target.closest('button')) setTranspose(0); });
 
 /* ---------- Controls ---------- */
-$('#sampleBtn').addEventListener('click',()=>{ say(''); state.source={kind:'sample',mel:sampleMel}; state.overrides=[]; state.transpose=0; sketch(); play(); });
+$('#sampleBtn').addEventListener('click',()=>{ say(''); state.source={kind:'sample',mel:sampleMel}; state.overrides=[]; state.transpose=0; showTempo(90); sketch(); play(); });
 $('#clearBtn').addEventListener('click',()=>{ say(''); stop(); take.notes=[]; state.source={kind:'time',from:'keys',notes:take.notes}; state.overrides=[]; state.transpose=0; sketch(); });
 $('#styles').addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b) return;
@@ -830,12 +855,15 @@ $('#bars').addEventListener('click',e=>{
 $('#playBtn').addEventListener('click',()=>player.playing?stop():play());
 $('#loopBtn').addEventListener('click',e=>{ state.loop=!state.loop; e.currentTarget.setAttribute('aria-pressed',state.loop); });
 $('#melBtn').addEventListener('click',e=>{ state.melody=!state.melody; e.currentTarget.setAttribute('aria-pressed',state.melody); restartIfPlaying(); });
-function setTempo(v){
-  v=Math.max(60,Math.min(140,v)); if(v===state.bpm) return;
+// The tempo is playback speed. A recording keeps its own beat (source.bpm) for the bar lines,
+// so changing speed never moves the chords against the tune.
+function showTempo(v){
   state.bpm=v; $('#tempoOut').textContent=v;
   $('#slower').disabled=v<=60; $('#faster').disabled=v>=140;
-  if(state.source.kind==='time') state.overrides=[];
-  sketch();
+}
+function setTempo(v){
+  v=Math.max(60,Math.min(140,v)); if(v===state.bpm) return;
+  showTempo(v);
 }
 [['#slower',-2],['#faster',2]].forEach(([id,d])=>{
   const b=$(id); let hold=0, rep=0, held=false;
